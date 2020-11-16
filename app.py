@@ -13,8 +13,8 @@ app.log.setLevel(logging.DEBUG)
 
 cors_config = CORSConfig(allow_origin="*")
 
-users_dictionary = {
-    "eduard@orkei.com": {"password": "liveproject", "videos": []}
+users_video_dictionary = {
+    "eduard@orkei.com": []
 }
 
 
@@ -25,17 +25,12 @@ def index():
 
 @app.authorizer()
 def basic_auth(auth_request):
-    mail, password = decode(auth_request.token)
-    app.log.debug("basic_auth " + mail + ", " + password)
-    app.log.debug("basic_auth jsondumps: " + json.dumps(users_dictionary))
+    username, password = decode(auth_request.token)
 
-    if mail in users_dictionary:
-        app.log.debug("basic_auth : mail in users_dictionary")
-
-    if mail in users_dictionary and users_dictionary[mail]["password"] == password:
-        app.log.debug("basic_auth : mail in users_dictionary and users_dictionary[mail][password] == password")
+    if username == password:
         context = {'is_admin': True}
-        return AuthResponse(routes=[AuthRoute('/*', ["GET", "POST"])], principal_id=mail, context=context)
+        # return AuthResponse(routes=['/*'], principal_id=username)
+        return AuthResponse(routes=[AuthRoute('/*', ["GET", "POST"])], principal_id=username, context=context)
     return AuthResponse(routes=[], principal_id=None)
 
 
@@ -45,16 +40,19 @@ def hi():
     return {'hello': context["principalId"], 'context': context}
 
 
-@app.route('/register', methods=['POST'], cors=cors_config)
-def register():
-    global users_dictionary
+#/videos?mail?eduard@orkei.com
+@app.route('/videos', methods=['GET'], authorizer=basic_auth)
+def videos():
+    global users_video_dictionary
     app.log.debug("GET Call app.route/register")
-    json_body = app.current_request.json_body
-    mail = json_body["mail"]
-    password = json_body["password"]
+    mail = app.current_request.query_params.get('mail')
 
-    users_dictionary[mail] = {"password": password, "videos": []}
-    return {"success": True, "users_dictionary": json.dumps(users_dictionary)}
+    if len(mail) == 0:
+        raise NotFoundError("mail is empty " + mail)
+
+    if mail in users_video_dictionary:
+        return {mail: json.dumps(users_video_dictionary[mail])}
+    raise NotFoundError("mail: " + mail + " not found")
 
 
 # GET /presignedurl?mail=eduard@orkei.com
@@ -73,10 +71,17 @@ def presigned_url():
     hexmail = h.hexdigest()
     print("hex mail: " + hexmail)
 
+    str_count = ""
+    if mail in users_video_dictionary:
+        str_count = str(len(users_video_dictionary[mail]))
+
+    new_user_video = hexmail + str_count + '.mp4'
+    users_video_dictionary[mail].append(new_user_video)
+
     s3_client = boto3.client('s3')
     try:
         response = s3_client.generate_presigned_post(Bucket="videos.oico.com",
-                                                     Key=hexmail + '.mp4',
+                                                     Key=new_user_video,
                                                      Fields={"acl": "public-read"},
                                                      Conditions=[{
                                                          'acl': 'public-read'
