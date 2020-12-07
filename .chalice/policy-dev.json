@@ -26,6 +26,21 @@
     },
     {
       "Effect": "Allow",
+      "Action": "elastictranscoder:*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sns:*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "dynamodb:*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
       "Action": "ses:SendTemplatedEmail",
       "Resource": "*"
     }

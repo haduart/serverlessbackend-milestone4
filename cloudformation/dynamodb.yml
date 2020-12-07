@@ -1,0 +1,19 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  responsesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "ProjectStep"
+          AttributeType: "S"
+        - AttributeName: "Mail"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "ProjectStep"
+          KeyType: "HASH"
+        - AttributeName: "Mail"
+          KeyType: "RANGE"
+      ProvisionedThroughput:
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+      TableName: "responses"

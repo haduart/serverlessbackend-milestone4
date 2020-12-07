@@ -9,7 +9,11 @@
   ],
   "stages": {
     "dev": {
-      "api_gateway_stage": "api"
+      "api_gateway_stage": "api",
+      "environment_variables": {
+        "RESPONSES_TABLE_NAME": "responses",
+        "MEDIA_BUCKET_NAME": "videos.oico.com"
+      }
     }
   }
 }
