@@ -12,7 +12,8 @@
       "api_gateway_stage": "api",
       "environment_variables": {
         "RESPONSES_TABLE_NAME": "responses",
-        "MEDIA_BUCKET_NAME": "videos.oico.com"
+        "MEDIA_BUCKET_NAME": "videos.oico.com",
+        "PIPELINE_NAME": "1607332673743-ta1eh3"
       }
     }
   }

@@ -147,7 +147,7 @@ def presigned_url(project, step):
     return response
 
 
-@app.on_s3_event(bucket=os.environ['MEDIA_BUCKET_NAME'],
+@app.on_s3_event(bucket=MEDIA_BUCKET_NAME,
                  events=['s3:ObjectCreated:*'])
 def handle_object_created(event):
     print("handle_object_created: " + event.key)
