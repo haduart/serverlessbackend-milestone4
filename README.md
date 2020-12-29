@@ -1,401 +1,356 @@
-## Creating video processing pipelines using event based architectures.
+## Serverless pipelines to do speech to text from videos
 
 **Objective**
 
-After a video is uploaded to S3, S3 dispatches an event that will trigger an AWS Lambda function that will transcode 
-the video into a lower bitrate. We will also add DynamoDB to store the information about the user who uploaded the video,
-the name of the video, and the bucket and folder where it is located.
-Because we like writing clean code we will introduce testing to secure and validate the project implementation, 
-including unit and integration tests.  
-  
+So far, we created just one lower resolution for the web which is 1080x720, 
+but we also want lower resolutions for small devices or poor connections so the 
+broadcaster or the video player can use the best fit. We want to run multiple transcoder 
+operations in parallel when a file is uploaded in S3: Three different resolutions for 
+the video and also another extracting only the audio. We will use AWS SNS to get a 
+notification when the transcoding pipeline job has completed, leading to multiple 
+actions: sending a mail notification to us, storing this data in the user profile 
+video list, and dispatching an AWS Lambda to process the audio file. Once the audio 
+file is generated, we will create a pipeline where we will first create a speech-to-text 
+file with Amazon Transcribe, storing it in a different DynamoDB table.
 
 **Workflow**
 
-***1. Connect the routes with DynamoDB using Python Botocore to store and retrieve the user and video information from a real database instead of an in-memory structure.***
-We want to connect to DynamoDB to store the necessary data for our project. The DynamoDB table should look like the following:
+***1. Create lower resolutions for small devices and extracting audio only***
+A part from the Web preset we will use the iPhone4S, Audio_MP3 and Gif_Animated presets. 
+So the Elastic Transcoder will generate all the codifications at the same time, and the 
+output directory should look like the following:
+![Alt text](docs/images/S3-structure.png?raw=true "S3 output structure")
 
-![Alt text](docs/images/dynamodb-table.png?raw=true "DynamoDB Table")
+***2. Create a mail notification when a video is processed correctly and also 
+when an error has happened.***
+For this, we need to configure the AWS Simple Email Service (SES). 
+1. First you have to register and confirm a mail to receive the notifications. 
+2. Then create SNS topics for both cases and attach this mail to it.
+3. Configure Elastic Transcoder to use the previous topics when there's an error and when the job is complete.   
 
-We will name this table *responses*
+***3.Create another function that is triggered when the audio-only file is created in S3 and executes Amazon Transcribe with it.***
+Boto S3 Amazon Transcribe works like the following:
+```python    
+    job_name = "JobName"
+    job_uri = "s3://outputvideos.oico.com/output/audio/test.mp3"
+    get_transcribe_client().start_transcription_job(
+        TranscriptionJobName=job_name,
+        Media={'MediaFileUri': job_uri},
+        MediaSampleRateHertz=44100,
+        MediaFormat='mp4',
+        LanguageCode='en-US',
+        OutputBucketName='outputvideos.oico.com',
+        OutputKey='output/transcribe/test.json',
+    )
 
-To make it simpler but still introduccing a persistence layer let's store the information whenever some askes for a presigned url.
-In the form of /presignedurl/testProject/0/?mail=eduard@orkei.com&project=Test&step=0
-Where *testProject* will be the route param *project* and in this case *0* will be the *step*. We want to stored as a composed 
-key in dynamoDB. (Check the table "DynamoDB Table") 
-
-Refactor the code so when we invoke the /videos url we fetch all the items. 
-  
-***2. Create an AWS Elastic Transcoder pipeline that handles all the transcoding jobs to create a lower resolution video.***
-
->Amazon Elastic Transcoder is media transcoding in the cloud. It is designed to be a highly scalable, easy to use and a 
-cost effective way for developers and businesses to convert (or *transcode*) media files from their source format into 
-versions that will playback on devices like smartphones, tablets and PCs.
-
-*[AWS Elastic Transcoder Documentation](https://aws.amazon.com/elastictranscoder/)*
-
-In AWS Elastic Transcoder there are three elements: Pipelines, Presets and Jobs.  
-Presets is the configuration that will be performed on the transcode operation. In our case we want lower resolution. 
-We will use a predefined configuration (preset) that is called *web* that converts the resolution to 1280x720. 
-
-A 3 minute mobile video shot with a Samsung S9+ has a resolution of 1920 × 1080 and its size is 355 MB. 
-After lowering the resolution to 1280x720 which is still HD, its size is 55 MB.
-
-The *Pipeline* is what we have to create in this step, is where we describe which S3 Buckets will be used for input and 
-output of the videos. As a good practice the output bucket, where the transcoded videos, audios and thumbnails images 
-will be stored, should be different that the input bucket with the original uploaded videos. 
-
-![Alt text](docs/images/created-pipeline.png?raw=true "Elastic Transcoder Pipeline")
-   
-  
-***3. Create a new function in AWS Chalice that is triggered when a file is stored in S3.***
-      * This function will write this new file in DynamoDB, it will create a transcoder job that will be executed in the 
-      Amazon Elastic Transcoder pipeline that we previously created, storing the new transcoded video back in S3.           
-
-For that there's a special annotation in AWS Chalice to mark that a function will be triggered by an S3 Event. 
-```python
-@app.on_s3_event(bucket=MEDIA_BUCKET_NAME,
-                 events=['s3:ObjectCreated:*'])
-``` 
-
-***4. Setup Pytests and create our first unit tests***    
-        
-***5. Create integration tests***
-
-In AWS Chalice we can use fixture to setup an integration test. 
-
-```python
-from pytest import fixture
+    status = get_transcribe_client().get_transcription_job(TranscriptionJobName=job_name)
+    print(status)
 ```
-   
+It's useful to follow the same convention as the rest of the output file structure. 
+We are planning to store it in the same outpub S3 bucket and following the folder structure: /output/transcribe/
+Notice that on the S3 event.key we can have the full path and name: output/audio/file.mp3. So we can use the same event.type 
+and replacing it for json format and audio folder for the transcribe folder. 
 
-**Mileston 2: Submit Your Work**
+![Alt text](docs/images/Amazon-Transcribe-Job.png?raw=true "S3 output structure")
+ 
+
+***4.Reuse the previous function and capture when the transcription JSON output text from Amazon Transcribe is created in S3 to store it in DynamoDB***   
+This function will parse the JSON file and store the transcription in DynamoDB.   
+
+Once Amazon Transcribe is completed a JSON document will be stored in S3. 
+
+This JSON structure will be like the following:
+
+```json
+{
+  "jobName": "TestTranscribe",
+  "accountId": "591#######07",
+  "results": {
+    "language_code": "en-US",
+    "transcripts": [
+      {
+        "transcript": "Hey, this is the full transcription!"
+      }
+    ],
+    "language_identification": [
+      {
+        "score": "0.9968",
+        "code": "en-US"
+      },
+      {
+        "score": "0.0032",
+        "code": "en-GB"
+      }
+    ],
+    "items":[
+        ...
+    ]
+  },
+  "status": "COMPLETED"
+}
+```
+What we want to store in DynamoDB is the transcript entry where you can find the full transcription:
+results > transcripts > 0 > transcript 
+
+Also, to store the transcription and all the following metadata information that we can extract out from the JSON file we 
+will create a different DynamoDB table. 
+
+We will use the following template for it:
+```yaml
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  responsesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "JsonFile"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "JsonFile"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+      TableName: "metadata"
+```
+Once everything is done, we should have an entry like this:
+![Alt text](docs/images/dynamodb-metadata-table.png?raw=true "DynamoDB entry in Metadata Table")
+
+**Mileston 3: Submit Your Work**
 
 The deliverable is the AWS Chalice Python project.  
 
 
-**Mileston 2: Solution**
+**Mileston 3: Solution**
 
-The solution is on ["Milestone 2 Github"](https://github.com/haduart/serverlessbackend-milestone2)
+The solution is on ["Milestone 3 Github"](https://github.com/haduart/serverlessbackend-milestone3)
 
-***1. Connect the routes with DynamoDB using Python Botocore to store and retrieve the user and video information from a real database instead of an in-memory structure.***
+***1. Create lower resolutions for small devices and extracting audio only***
+A part from the Web preset we will use the iPhone4S, Audio_MP3 and Gif_Animated presets. 
+So the Elastic Transcoder will generate all the codifications at the same time, and the 
+output directory should look like the following:
+![Alt text](docs/images/S3-structure.png?raw=true "S3 output structure")
 
-First we create the DynamoDB table where we will story the video responses that we are collecting.
-The main keys will be "Project", that is a String, "Step" that in case of having multiple interactions in that project 
-it will store its value as a number. Finally, the mail of the user that has uploaded a video for that Project and Step.
-
-```commandline
-$ aws cloudformation create-stack --stack-name dynamodb-oico --capabilities CAPABILITY_IAM --template-body file://cloudformation/dynamodb.yml
-```
-Then in the project we will get the table name by environment variables, setting different values depending on the stage that we are working on. So the .chalice/config.json will look like:
-```json
-{
-"stages": {
-    "dev": {
-      "api_gateway_stage": "api",
-      "environment_variables": {
-        "RESPONSES_TABLE_NAME": "responses"
-      }
-    }
-  }
-}
-```
-
-In the project we will pick up this variable, and we will use boto3 dynamodb sdk to interact with it:
+To create the previous structure we have to specified in the output array that we pass as an argument to the elastic_transcoder_job.
 ```python
-import os
-import boto3
-
-RESPONSES_TABLE_NAME = os.getenv('RESPONSES_TABLE_NAME', 'defaultTable')
-
-response_data_table = boto3.resource('dynamodb').Table(RESPONSES_TABLE_NAME)
-```
-
-To start making the code nicer we will use global variable to cache the boto sdk connections:
-```python
-_DYNAMODB_CLIENT = None
-_DYNAMODB_TABLE = None
-
-RESPONSES_TABLE_NAME = os.getenv('RESPONSES_TABLE_NAME', 'defaultTable')
-
-def get_dynamodb_table():
-    global _DYNAMODB_TABLE
-    global _DYNAMODB_CLIENT
-    if _DYNAMODB_TABLE is None:
-        _DYNAMODB_CLIENT = boto3.resource('dynamodb')
-        _DYNAMODB_TABLE = _DYNAMODB_CLIENT.Table(RESPONSES_TABLE_NAME)
-    return _DYNAMODB_TABLE
-```
-
-Now when we ask for a presigned URL this information will be stored in the database:
-```python
-# GET /presignedurl/testProject/0/?mail=eduard@orkei.com&project=Test&step=0
-@app.route('/presignedurl/{project}/{step}', methods=['GET'], cors=cors_config)
-def presigned_url(project, step):
-    if app.current_request.query_params is None:
-        raise NotFoundError("No parameter has been sent")
-
-    mail = app.current_request.query_params.get('mail')
-    if len(mail) == 0:
-        raise NotFoundError("mail is empty")
-    print("query_param mail: " + mail)
-
-    if project is None or len(project) == 0:
-        raise NotFoundError("project is empty")
-    print("query_param project: " + project)
-
-    step_number = 0
-    if step is not None or len(step) > 0:
-        try:
-            step_number = int(step)
-        except ValueError:
-            print("query_param v is not a number: " + step)
-            step_number = 0
-    print("query_param step: " + step)
-
-    h = blake2b(digest_size=10)
-    byte_mail = bytes(mail, 'utf-8')
-    h.update(byte_mail)
-    hexmail = h.hexdigest()
-    print("hex mail: " + hexmail)
-
-    new_user_video = project + "/" + str(step_number) + "/" + hexmail + '.webm'
-
-    try:
-        get_dynamodb_table().put_item(Item={
-            "ProjectStep": project + "-" + str(step_number),
-            "Mail": mail,
-            "video": new_user_video
-        })
-    except Exception as e:
-        print(e)
-        raise NotFoundError("Error adding an element on dynamodb")
-
-    try:
-        response = get_s3_client().generate_presigned_post(Bucket="videos.oico.com",
-                                                           Key=new_user_video,
-                                                           Fields={"acl": "public-read"},
-                                                           Conditions=[{
-                                                               'acl': 'public-read'
-                                                           }],
-                                                           ExpiresIn=3600)
-    except ClientError as e:
-        logging.error(e)
-        raise BadRequestError("Internal Error generating presigned post ")
-    return response
-```
-
-We will refactor de /videos call to fetch the information from DynamoDB:
-```python
-# /videos/?mail=eduard@orkei.com
-@app.route('/videos', methods=['GET'], authorizer=basic_auth)
-def videos():
-    app.log.debug("GET Call app.route/videos")
-    mail = app.current_request.query_params.get('mail')
-
-    if len(mail) == 0:
-        raise NotFoundError("mail is empty")
-
-    response = get_dynamodb_table().query(
-        KeyConditionExpression=Key('ProjectStep').eq('Alba-0')
-    )
-    items = response['Items']
-    print(items)
-
-    return json.dumps(items)
-```
-
-If we want to test DynamoDB from the command line AWS CLI we can use the following commands:
-
-Count all items at DeviceData
-```commandline
-aws dynamodb scan --table-name responses --select "COUNT"
-```
-
-Getting all elements that had the extended Keep Alive
-```commandline
-
-aws dynamodb scan \
-  --table-name responses \
-  --filter-expression "attribute_exists(video)"
-
-aws dynamodb scan  \
- --table-name responses  \
---filter-expression "Mail = :mail"  \
---expression-attribute-values '{":mail" : {"S":"eduard@orkei.com"}}' 
-```
-
-***2. Create an AWS Elastic Transcoder pipeline that handles all the transcoding jobs to create a lower resolution video.*** 
-
-***3. Create a new function in AWS Chalice that is triggered when a file is stored in S3.***    
-
-Before using a new service like AWS Elastic Transcoder let's remember to give permissions to our *Lambda function* within
-Chalice to have access to it. So like we did to access S3 we have to add custom policy permissions in our project. 
-For that we have to include the following rules in *.chalice/policy-dev.json*
-
-```json
-{
-      "Effect": "Allow",
-      "Action": "elastictranscoder:*",
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": "sns:*",
-      "Resource": "*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": "dynamodb:*",
-      "Resource": "*"
-    },
-```
- 
-Capturing a S3 Event in AWS Chalice is quite simple:
-```python
-@app.on_s3_event(bucket=MEDIA_BUCKET_NAME,
-                 events=['s3:ObjectCreated:*'])
-def handle_object_created(event):
-    print("handle_object_created: " + event.key)
-    if _is_video(event.key):
-        print("Correct video uploaded: " + event.key)
-        transcoder_video(event.key)
-```
-For transcoding a video we will use elastictranscoder boto3 SDK. We will create a new job for each new video that we 
-want to transcode with the correct parameters that will be chosing the right pipeline ID already created in the previous 
-step, and choosing the preset or presets that we want to use. In our case we want to use the System Preset Web, which 
-id is *'1351620000001-100070'*
-
-```python
-def transcoder_video(input_file):    
-    pipeline_id = PIPELINE_NAME  
-    output_file = input_file  # Desired root name of the transcoded output files
-
-    output_file_prefix = 'output/'  # Prefix for all output files
-
-    system_preset_web_preset_id = '1351620000001-100070'
-    
+# Define the various outputs
     outputs = [
         {
             'Key': 'web/' + output_file,
             'PresetId': system_preset_web_preset_id
+        },
+        {
+            'Key': 'phone/' + output_file,
+            'PresetId': system_preset_iPhone4S
+        },
+        {
+            'Key': 'audio/' + output_file.replace("mp4", "") + "mp3",
+            'PresetId': system_preset_Audio_MP3_320k
+        },
+        {
+            'Key': 'gif/' + output_file.replace("mp4", "") + "gif",
+            'PresetId': system_preset_Gif_Animated
         }
     ]
+```
+We also need to know the Presets Ids for all the different outputs that we want to generate:
+```python
+    output_file_prefix = 'output/'  # Prefix for all output files
 
-    # Create a job in Elastic Transcoder
-    job_info = create_elastic_transcoder_job(pipeline_id,
-                                             input_file,
-                                             outputs, output_file_prefix)
-    if job_info is None:
-        print("job_info has failed!!!!")
+    system_preset_web_preset_id = '1351620000001-100070' #mp4
+    system_preset_iPhone4S = '1351620000001-100020' #mp4
+    system_preset_Audio_MP3_320k = '1351620000001-100110' #mp3
+    system_preset_Gif_Animated = '1351620000001-100200' #gif
+```
+To find out the concrete Preset Id you have to search it in the Preset section in the Elastic Transcoder:
+![Alt text](docs/images/transcoder-presets.png?raw=true "Presets Ids")
 
-    # Output job ID and exit. Do not wait for the job to finish.
-    print(f'Created Amazon Elastic Transcoder job {job_info["Id"]}')
-``` 
-Once we have the parameters right is just invoking the boto SDK correctly:
+
+***2. Create a mail notification when a video is processed correctly and also 
+when an error has happened.***
+For this, we need to configure the AWS Simple Email Service (SES). 
+1. First you have to register and confirm a mail to receive the notifications.
+![Alt text](docs/images/verify-new-email-address.png?raw=true "Verify new mail")
+You will receive a mail to cofirm it, click on the link below.  
+![Alt text](docs/images/verify-new-email-address-2.png?raw=true "Verify new mail")
+In SES it will remain pending until it's not confirm
+![Alt text](docs/images/SES-pending-verification.png?raw=true "Pending confirmation in SES")
+
+2. Then create SNS topics for both cases and attach this mail to it.
+Create the topics and subscribe the previous validated mail
+![Alt text](docs/images/SNS-create-subscription.png?raw=true "SNS create subscription")
+![Alt text](docs/images/email-SNS-confirm-subscription.png?raw=true "Email SNS confirm subscription")
+![Alt text](docs/images/SNS-topics.png?raw=true "SNS topics")
+
+3. Configure Elastic Transcoder to use the previous topics when there's an error and when the job is complete.
+If you did it correctly you will receive a mail when the job is completed:
+![Alt text](docs/images/email-on-Complete?raw=true "Email On Complete")
+
+***3.Create another function that is triggered when the audio-only file is created in S3 and executes Amazon Transcribe with it.***
+The same that we did when a file was uploaded to S3 and we did all the codification we will do it when a file is created in the second S3 bucket. 
 
 ```python
-def create_elastic_transcoder_job(pipeline_id, input_file,
-                                  outputs, output_file_prefix):
-    try:
-        response = get_elastictranscoder_client().create_job(PipelineId=pipeline_id,
-                                                             Input={'Key': input_file},
-                                                             Outputs=outputs,
-                                                             OutputKeyPrefix=output_file_prefix)
-    except ClientError as e:
-        print(f'ERROR: {e}')
-        return None
-    return response['Job']
+@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
+                 events=['s3:ObjectCreated:*'])
+def handle_audio_created(event):
+    print("handle_audio_created: " + event.key)
+    if _is_audio(event.key):
+        print("Correct Audio generated: " + event.key)
+        random_name = str(random.randint(10000, 99999))
+        job_name = "JobName" + random_name
+        job_uri = "s3://" + AUDIO_MEDIA_BUCKET_NAME + "/" + event.key
+        get_transcribe_client().start_transcription_job(
+            TranscriptionJobName=job_name,
+            Media={'MediaFileUri': job_uri},
+            MediaSampleRateHertz=44100,
+            MediaFormat='mp4',
+            LanguageCode='en-US',
+            OutputBucketName=AUDIO_MEDIA_BUCKET_NAME,
+            OutputKey=event.key.replace("mp3", "json").replace("audio", "transcribe"),
+        )
+
+        status = get_transcribe_client().get_transcription_job(TranscriptionJobName=job_name)
+        print(status)
+        return {'transcribe': job_name}
 ```
-Take into account that the output file will be the same as the input one in this example. With all the subfolder. 
 
-![Alt text](docs/images/transcoded-S3-output-sample.png?raw=true "Example of the Elastic Transcoder output structure in S3")
+To make it work we created some helper functions:
+```python
+def get_transcribe_client():
+    global _TRANSCRIBE_CLIENT
+    if _TRANSCRIBE_CLIENT is None:
+        _TRANSCRIBE_CLIENT = boto3.client('transcribe')
+    return _TRANSCRIBE_CLIENT
 
-***4. Setup Pytests and create our first unit tests***   
+def _is_audio(key):
+    return key.endswith(_SUPPORTED_AUDIO_EXTENSIONS)
+```
 
-First install the library pytest to create the tests. We don't have to added it in the requirements 
-since it's not something that we want to deploy within our Lambda function. 
+So like we did to access S3 and Elastic Transcoder we have to add custom policy permissions in our project. 
+For that we have to include the following rules in .chalice/policy-dev.json 
+
+```json
+  {
+      "Effect": "Allow",
+      "Action": [
+        "transcribe:*"
+      ],
+      "Resource": "*"
+    }
+```
+
+***4.Reuse the previous function and capture when the transcription JSON output text from Amazon Transcribe is created in S3 to store it in DynamoDB***   
+   
+It's useful to follow the same convention as the rest of the output file structure. 
+We are planning to store it in the same outpub S3 bucket and following the folder structure: /output/transcribe/
+Notice that on the S3 event.key we can have the full path and name: output/audio/file.mp3. So we can use the same event.type 
+and replacing it for json format and audio folder for the transcribe folder. 
+
+We will reuse the same function:
+
+```python
+@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
+                 events=['s3:ObjectCreated:*'])
+def handle_audio_created(event):
+    print("handle_audio_created: " + event.key)
+    if _is_audio(event.key):
+        ...
+    elif _is_text(event.key):
+        print("Correct JSON generated: " + event.key)
+        s3_clientobj = get_s3_client().get_object(Bucket=event.bucket,
+                                                  Key=event.key)
+        s3_clientdata = s3_clientobj['Body'].read().decode('utf-8')
+
+        print("printing s3_clientdata")
+        print(s3_clientdata)
+
+        s3clientlist = json.loads(s3_clientdata)
+        print("json loaded data")
+        print("status: " + s3clientlist['status'])
+        transcript = s3clientlist['results']['transcripts'][0]['transcript']
+        print("transcript: " + transcript)
+
+```
+
+Also, to store the transcription and all the following metadata information that we can extract out from the JSON file we 
+will create a different DynamoDB table. 
+
+We will use the following template for it:
+```yaml
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  responsesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: "JsonFile"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "JsonFile"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+      TableName: "metadata"
+```
+
+We will create this table using cloudformation from the AWS CLI:
 
 ```commandline
-$ pip install pytest
-
-$ pytest
-
-================== test session starts ================== 
-platform darwin -- Python 3.7.3, pytest-6.1.2, py-1.9.0, pluggy-0.13.1
-rootdir: /Users/haduart/Documents/serverlessbackend
-collected 0 items                                                                                                                                                          
-
-================== no tests ran in 0.03s ================== 
-``` 
-To create our first test we create a file named test_app.py. Because it starts with test_ python 
-knows that it's a test. 
-     
-***5. Create integration tests***
-To create integration tests we use pytest fixtures for that. 
-
-```python
-from pytest import fixture
-import app
-from basicauth import decode, encode
-import json
-
-@fixture
-def api():
-    from chalice.local import LocalGateway
-    from chalice.config import Config
-    return LocalGateway(app.app, Config())
+$ aws cloudformation create-stack --stack-name dynamodb-metadata --capabilities CAPABILITY_IAM --template-body file://cloudformation/dynamodb-metadata-table.yml
 ```
 
-Once we have created or testing api we can pass it in our testing functions to be able tot test requests. For example 
-we will test if we are authorized or not. 
-```python
-def test_root_path(api):
-    response = api.handle_request(method='GET', path='/', body=None, headers={})
-    assert 200 == response['statusCode']
-    assert {'hello': 'world'} == json.loads(response['body'])
-
-
-def test_basic_authentication(api):
-    autorization = {'Authorization': encode("edu", "edu")}
-    response = api.handle_request(method='GET', path='/hello', body=None, headers=autorization)
-    assert 200 == response['statusCode']
-
+We add the extra parameter in the .chalice/config.json file:
+```json
+"METADATA_TABLE_NAME": "metadata",
 ```
+Of course we will use this variable in our project and we will create a caching mechanism around the new table
+```python
+_DYNAMODB_METADATA_TABLE = None
+METADATA_TABLE_NAME = os.getenv('METADATA_TABLE_NAME', 'metadata')
+
+def get_dynamodb_metadata_table():
+    global _DYNAMODB_METADATA_TABLE
+    global _DYNAMODB_CLIENT
+    if _DYNAMODB_METADATA_TABLE is None:
+        if _DYNAMODB_CLIENT is None:
+            _DYNAMODB_CLIENT = boto3.resource('dynamodb')
+        _DYNAMODB_METADATA_TABLE = _DYNAMODB_CLIENT.Table(METADATA_TABLE_NAME)
+    return _DYNAMODB_METADATA_TABLE
+```
+
+Once we have this we can extend one more time our handle_audio_created function that is triggered when an S3 object is created,
+and this time we will add the last step to store the transcription in our new table:
+```python
+    elif _is_text(event.key):
+        ...
+
+        try:
+            get_dynamodb_metadata_table().put_item(Item={
+                "JsonFile": event.key,
+                "transcript": transcript
+            })
+        except Exception as e:
+            print(e)
+            raise NotFoundError("Error adding an element on dynamodb")
+```
+
+Once everything is done, we should have an entry like this:
+![Alt text](docs/images/dynamodb-metadata-table.png?raw=true "DynamoDB entry in Metadata Table")
 
 **Importance to project**
-
-In this project we have experienced the first *Event Driven Architecture*, handling an event after a file is being uploaded 
-in S3 and doing a processing on it in an asynchronous way.
-
-We have also added a database layer to our project, using a *NoSQL* database like *DynamoDB*.
-
-Finally, we've start setting up PyTest tooling to be able to test our project using unit testing and integration testing.         
+In this project we have experienced a more advanced and complex Event Driven Architecture, doing multiple
+asynchronous steps when a file is being uploaded. Each step involves different AWS services, also getting 
+more expertise in each of them: 
+* We used Amazon Elastic Transcoder extensively to do multiple media convertions from the original video to multiple resolutions, audio and a gif animation too.
+* We learned how to use Amazon Transcribe and how to triggered from an AWS Lambda Python function.    
 
 **Takeaways**
-* How to capture triggered events with Lambda functions within an AWS Chalice project.
-* Hands-on experience with Amazon Elastic Transcoder pipelines, jobs, and presets, and how they can be automated using AWS Lambda functions.
-* Hands-on experience with DynamoDB, query, insert, and update with Python and Botocore Library.
-* Experience testing with both Unit and Integration tests. 
-
+* Experience with event-driven architectures
+* Hands-on experience with Amazon Simple Email Service 
+* Experience with complex flows with Amazon Elastic Transcoder
+* Using Amazon Transcribe 
 
 **Resources**
 
-***DynamoDB***
-
-* [How to add data in DynamoDB with Boto3](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/GettingStarted.Python.03.html#GettingStarted.Python.03.01)
-* [Working with Queries in DynamoDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Query.html)
-* [Best Practices for DynamodDB](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/BestPractices.html)
-* [Working with Scans](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Scan.html) 
-* [Scans ConditionExpressions](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.ConditionExpressions.html)
-* [Choosing the Right DynamoDB Partition Key](https://aws.amazon.com/es/blogs/database/choosing-the-right-dynamodb-partition-key/)
-
-***S3***
-
-* [AWS Chalice: Add S3 event source](https://chalice-workshop.readthedocs.io/en/latest/media-query/04-s3-event.html)
-
-***ElasticTranscoder***
-* [ElasticTranscoder: Notifications of Job Status](https://docs.aws.amazon.com/elastictranscoder/latest/developerguide/notifications.html)
-* [Controlling Access to ElasticTranscoder](https://docs.aws.amazon.com/elastictranscoder/latest/developerguide/access-control.html)
-
-***Python Test***
-* [Testing AWS Chalice](https://aws.github.io/chalice/topics/testing.html)
+* [Amazon Transcribe Developer Guide](https://docs.aws.amazon.com/transcribe/latest/dg/API_StartTranscriptionJob.html#transcribe-StartTranscriptionJob-request-OutputKey)

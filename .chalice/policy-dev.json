@@ -20,6 +20,7 @@
       "Resource": "arn:aws:logs:*:*:*"
     },
     {
+
       "Effect": "Allow",
       "Action": "s3:*",
       "Resource": "*"
@@ -37,6 +38,13 @@
     {
       "Effect": "Allow",
       "Action": "dynamodb:*",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "transcribe:*"
+      ],
       "Resource": "*"
     },
     {

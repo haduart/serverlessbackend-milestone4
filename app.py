@@ -8,24 +8,42 @@ from hashlib import blake2b
 import json
 import os
 from boto3.dynamodb.conditions import Key
+import random
 
 app = Chalice(app_name='serverlessbackend')
 
 _S3_CLIENT = None
 _DYNAMODB_CLIENT = None
 _DYNAMODB_TABLE = None
+_DYNAMODB_METADATA_TABLE = None
 _ELASTIC_TRANSCODER_CLIENT = None
+_TRANSCRIBE_CLIENT = None
 _SUPPORTED_VIDEO_EXTENSIONS = (
     '.mp4'
+)
+_SUPPORTED_AUDIO_EXTENSIONS = (
+    '.mp3'
+)
+_SUPPORTED_TEXT_EXTENSIONS = (
+    '.json'
 )
 
 app.log.setLevel(logging.DEBUG)
 
-RESPONSES_TABLE_NAME = os.getenv('RESPONSES_TABLE_NAME', 'defaultTable')
+RESPONSES_TABLE_NAME = os.getenv('RESPONSES_TABLE_NAME', 'responses')
+METADATA_TABLE_NAME = os.getenv('METADATA_TABLE_NAME', 'metadata')
 MEDIA_BUCKET_NAME = os.getenv('MEDIA_BUCKET_NAME', 'videos.oico.com')
+AUDIO_MEDIA_BUCKET_NAME = os.getenv('AUDIO_MEDIA_BUCKET_NAME', 'outputvideos.oico.com')
 PIPELINE_NAME = os.getenv('PIPELINE_NAME', '1607332673743-ta1eh3')
 
 cors_config = CORSConfig(allow_origin="*")
+
+
+def get_transcribe_client():
+    global _TRANSCRIBE_CLIENT
+    if _TRANSCRIBE_CLIENT is None:
+        _TRANSCRIBE_CLIENT = boto3.client('transcribe')
+    return _TRANSCRIBE_CLIENT
 
 
 def get_elastictranscoder_client():
@@ -39,9 +57,20 @@ def get_dynamodb_table():
     global _DYNAMODB_TABLE
     global _DYNAMODB_CLIENT
     if _DYNAMODB_TABLE is None:
-        _DYNAMODB_CLIENT = boto3.resource('dynamodb')
+        if _DYNAMODB_CLIENT is None:
+            _DYNAMODB_CLIENT = boto3.resource('dynamodb')
         _DYNAMODB_TABLE = _DYNAMODB_CLIENT.Table(RESPONSES_TABLE_NAME)
     return _DYNAMODB_TABLE
+
+
+def get_dynamodb_metadata_table():
+    global _DYNAMODB_METADATA_TABLE
+    global _DYNAMODB_CLIENT
+    if _DYNAMODB_METADATA_TABLE is None:
+        if _DYNAMODB_CLIENT is None:
+            _DYNAMODB_CLIENT = boto3.resource('dynamodb')
+        _DYNAMODB_METADATA_TABLE = _DYNAMODB_CLIENT.Table(METADATA_TABLE_NAME)
+    return _DYNAMODB_METADATA_TABLE
 
 
 def get_s3_client():
@@ -53,7 +82,19 @@ def get_s3_client():
 
 @app.route('/')
 def index():
-    return {'hello': 'world'}
+    s3_clientobj = get_s3_client().get_object(Bucket='outputvideos.oico.com',
+                                              Key='output/transcribe/videoask.json')
+    s3_clientdata = s3_clientobj['Body'].read().decode('utf-8')
+
+    print("printing s3_clientdata")
+    print(s3_clientdata)
+
+    s3clientlist = json.loads(s3_clientdata)
+    print("json loaded data")
+    print("status: " + s3clientlist['status'])
+    transcript = s3clientlist['results']['transcripts'][0]['transcript']
+    print("transcript: " + transcript)
+    return {'transcript': transcript}
 
 
 @app.authorizer()
@@ -156,6 +197,53 @@ def handle_object_created(event):
         transcoder_video(event.key)
 
 
+@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
+                 events=['s3:ObjectCreated:*'])
+def handle_audio_created(event):
+    print("handle_audio_created: " + event.key)
+    if _is_audio(event.key):
+        print("Correct Audio generated: " + event.key)
+        random_name = str(random.randint(10000, 99999))
+        job_name = "JobName" + random_name
+        job_uri = "s3://" + AUDIO_MEDIA_BUCKET_NAME + "/" + event.key
+        get_transcribe_client().start_transcription_job(
+            TranscriptionJobName=job_name,
+            Media={'MediaFileUri': job_uri},
+            MediaSampleRateHertz=44100,
+            MediaFormat='mp4',
+            LanguageCode='en-US',
+            OutputBucketName=AUDIO_MEDIA_BUCKET_NAME,
+            OutputKey=event.key.replace("mp3", "json").replace("audio", "transcribe"),
+        )
+
+        status = get_transcribe_client().get_transcription_job(TranscriptionJobName=job_name)
+        print(status)
+        return {'transcribe': job_name}
+    elif _is_text(event.key):
+        print("Correct JSON generated: " + event.key)
+        s3_clientobj = get_s3_client().get_object(Bucket=event.bucket,
+                                                  Key=event.key)
+        s3_clientdata = s3_clientobj['Body'].read().decode('utf-8')
+
+        print("printing s3_clientdata")
+        print(s3_clientdata)
+
+        s3clientlist = json.loads(s3_clientdata)
+        print("json loaded data")
+        print("status: " + s3clientlist['status'])
+        transcript = s3clientlist['results']['transcripts'][0]['transcript']
+        print("transcript: " + transcript)
+
+        try:
+            get_dynamodb_metadata_table().put_item(Item={
+                "JsonFile": event.key,
+                "transcript": transcript
+            })
+        except Exception as e:
+            print(e)
+            raise NotFoundError("Error adding an element on dynamodb")
+
+
 def create_elastic_transcoder_job(pipeline_id, input_file,
                                   outputs, output_file_prefix):
     """Create an Elastic Transcoder job
@@ -187,7 +275,11 @@ def transcoder_video(input_file):
     # Other job configuration settings. Optionally change as desired.
     output_file_prefix = 'output/'  # Prefix for all output files
 
-    system_preset_web_preset_id = '1351620000001-100070'
+    system_preset_web_preset_id = '1351620000001-100070' #mp4
+    system_preset_iPhone4S = '1351620000001-100020' #mp4
+    system_preset_Audio_MP3_320k = '1351620000001-100110' #mp3
+    system_preset_Gif_Animated = '1351620000001-100200' #gif
+
     system_preset_webm_720p_preset_id = '1351620000001-100240'
     system_preset_webm_VP9_720p_preset_id = '1351620000001-100250'
     system_preset_webm_VP9_360p_preset_id = '1351620000001-100260'
@@ -197,6 +289,18 @@ def transcoder_video(input_file):
         {
             'Key': 'web/' + output_file,
             'PresetId': system_preset_web_preset_id
+        },
+        {
+            'Key': 'phone/' + output_file,
+            'PresetId': system_preset_iPhone4S
+        },
+        {
+            'Key': 'audio/' + output_file.replace("mp4", "") + "mp3",
+            'PresetId': system_preset_Audio_MP3_320k
+        },
+        {
+            'Key': 'gif/' + output_file.replace("mp4", "") + "gif",
+            'PresetId': system_preset_Gif_Animated
         }
     ]
 
@@ -219,6 +323,13 @@ def transcoder_video(input_file):
 #        name=message['Video']['S3ObjectName'],
 #        media_type=db.VIDEO_TYPE,
 #        labels=labels)
+
+def _is_audio(key):
+    return key.endswith(_SUPPORTED_AUDIO_EXTENSIONS)
+
+
+def _is_text(key):
+    return key.endswith(_SUPPORTED_TEXT_EXTENSIONS)
 
 
 def _is_video(key):
