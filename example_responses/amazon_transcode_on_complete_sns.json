@@ -1,0 +1,47 @@
+{
+  "state": "COMPLETED",
+  "version": "2012-09-25",
+  "jobId": "1609273710440-ricuek",
+  "pipelineId": "1607332673743-ta1eh3",
+  "input": {
+    "key": "Test/angry2.mp4"
+  },
+  "inputCount": 1,
+  "outputKeyPrefix": "output/",
+  "outputs": [
+    {
+      "id": "1",
+      "presetId": "1351620000001-100070",
+      "key": "web/Test/angry2.mp4",
+      "status": "Complete",
+      "duration": 134,
+      "width": 1280,
+      "height": 720
+    },
+    {
+      "id": "2",
+      "presetId": "1351620000001-100020",
+      "key": "phone/Test/angry2.mp4",
+      "status": "Complete",
+      "duration": 134,
+      "width": 1280,
+      "height": 720
+    },
+    {
+      "id": "3",
+      "presetId": "1351620000001-100110",
+      "key": "audio/Test/angry2.mp3",
+      "status": "Complete",
+      "duration": 134
+    },
+    {
+      "id": "4",
+      "presetId": "1351620000001-100200",
+      "key": "gif/Test/angry2.gif",
+      "status": "Complete",
+      "duration": 134,
+      "width": 1280,
+      "height": 720
+    }
+  ]
+}

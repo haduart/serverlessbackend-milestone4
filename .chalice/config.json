@@ -12,6 +12,18 @@
       "api_gateway_stage": "api",
       "environment_variables": {
         "RESPONSES_TABLE_NAME": "responses",
+        "AMAZON_TRANSCODER_ON_COMPLETE_TOPIC": "videopipelineONCOMPLETE",
+        "METADATA_TABLE_NAME": "metadata",
+        "MEDIA_BUCKET_NAME": "videos.oico.com",
+        "AUDIO_MEDIA_BUCKET_NAME": "outputvideos.oico.com",
+        "PIPELINE_NAME": "1607332673743-ta1eh3"
+      }
+    },
+    "prod": {
+      "api_gateway_stage": "api",
+      "environment_variables": {
+        "RESPONSES_TABLE_NAME": "responses",
+        "AMAZON_TRANSCODER_ON_COMPLETE_TOPIC": "videopipelineONCOMPLETE",
         "METADATA_TABLE_NAME": "metadata",
         "MEDIA_BUCKET_NAME": "videos.oico.com",
         "AUDIO_MEDIA_BUCKET_NAME": "outputvideos.oico.com",

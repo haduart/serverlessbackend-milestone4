@@ -1,356 +1,403 @@
-## Serverless pipelines to do speech to text from videos
+## Using Sentiment Analysis and CI/CD pipelines for serverless projects.
 
 **Objective**
 
-So far, we created just one lower resolution for the web which is 1080x720, 
-but we also want lower resolutions for small devices or poor connections so the 
-broadcaster or the video player can use the best fit. We want to run multiple transcoder 
-operations in parallel when a file is uploaded in S3: Three different resolutions for 
-the video and also another extracting only the audio. We will use AWS SNS to get a 
-notification when the transcoding pipeline job has completed, leading to multiple 
-actions: sending a mail notification to us, storing this data in the user profile 
-video list, and dispatching an AWS Lambda to process the audio file. Once the audio 
-file is generated, we will create a pipeline where we will first create a speech-to-text 
-file with Amazon Transcribe, storing it in a different DynamoDB table.
+We will perform the call to Amazon Comprehend with the speech-to-text transcription that we already had to detect 
+the Sentiment synchronously, persisting it altogether in the same DynamoDB table.
+Because the Amazon Lambda that is listening for created objects in S3 is quite big we will do a refactoring extracting 
+part of the code in another Amazon Lambda function that will be triggered from the onComplete SNS topic when 
+the Elastic Transcoder is done.  
+
+After that we will create multiple stages with AWS Chalice to be able to test the project in test 
+environments separately from production. We will use environment variables to achieve this. Environment 
+variables are dynamic variables that we can setup in the terminal or in the system. They can affect the 
+way running processes will behave. For example, in our project we will use them to define which services 
+(like the database or storage) we are using depending if we are in production or in testing mode. 
+Using this we can connect to one or another database, S3 bucket, or SNS topic depending on the variables, 
+separating the production and development stages. We will also deploy our project inside AWS CodeCommit and 
+create a CI/CD pipeline. We will create custom HTTP responses if an error occurs with AWS Chalice and 
+log it in AWS CloudWatch. 
+
 
 **Workflow**
 
-***1. Create lower resolutions for small devices and extracting audio only***
-A part from the Web preset we will use the iPhone4S, Audio_MP3 and Gif_Animated presets. 
-So the Elastic Transcoder will generate all the codifications at the same time, and the 
-output directory should look like the following:
-![Alt text](docs/images/S3-structure.png?raw=true "S3 output structure")
+***1. From the transcription invoke Amazon Comprehend to get the Sentiment and store it in DynamoDB***
+Because Amazon Comprehend can do a sync call to determine the sentiment, we can easily do this call before storing it to DynamoDB. 
 
-***2. Create a mail notification when a video is processed correctly and also 
-when an error has happened.***
-For this, we need to configure the AWS Simple Email Service (SES). 
-1. First you have to register and confirm a mail to receive the notifications. 
-2. Then create SNS topics for both cases and attach this mail to it.
-3. Configure Elastic Transcoder to use the previous topics when there's an error and when the job is complete.   
+The result should look like the following in the DynamoDB
+![Alt text](images/dynamodb_sentiment_stored.png.png?raw=true "S3 output structure")
 
-***3.Create another function that is triggered when the audio-only file is created in S3 and executes Amazon Transcribe with it.***
-Boto S3 Amazon Transcribe works like the following:
-```python    
-    job_name = "JobName"
-    job_uri = "s3://outputvideos.oico.com/output/audio/test.mp3"
+***1.1 Refactoring: Using SNS to breack the S3 Event function handler*** 
+Because we have the same function listening for events on S3 and because we can only have one function listening on a S3 bucket 
+we have that the function handle_audio_created is for both audio and json:
+```python
+@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
+                 events=['s3:ObjectCreated:*'])
+def handle_audio_created(event):
+    if _is_audio(event.key):
+        ...
+    elif _is_text(event.key):
+        ...
+      
+```
+Taking a look a the services we see that Amazon Elastic Transcoder can post to a SNS topic when it's completed, but Amazon Transcribe
+doesn't do it. So actually we can create a different function listneing on the SNS topic onComplete and a part from sending a mail we can execute
+a lambda function and do the processing of the Audio. 
+
+We can use the @app.on_sns_message(topic=os.environ['TOPIC_NAME']) decorator to listen for it.
+
+To implement it we need to know the json structure that is being posted on the onComplete topic. Actually it's quite easy
+since we've configured the same topic to send us an email with the json document as a message. 
+So it looks like:
+
+```json
+{
+  "state": "COMPLETED",
+  "version": "2012-09-25",
+  "jobId": "1609273710440-ricuek",
+  "pipelineId": "1607332673743-ta1eh3",
+  "input": {
+    "key": "Test/angry2.mp4"
+  },
+  "inputCount": 1,
+  "outputKeyPrefix": "output/",
+  "outputs": [
+    ...
+    {
+      "id": "3",
+      "presetId": "1351620000001-100110",
+      "key": "audio/Test/angry2.mp3",
+      "status": "Complete",
+      "duration": 134
+    },
+    ...
+  ]
+}
+```
+
+***2. Create multiple stages with AWS Chalice*** 
+Right now we are working always on dev environment, but we want to create 
+the production environment.
+
+In the production environment we will use different resources, so we will customize the environment 
+variables that we pass in. 
+
+If you are copying the environment variables from the development staging 
+it will fail if the S3 buckets are the same from development. There can only be one 
+Lambda function subscribed to a S3 bucket. 
+
+***3.Create a CI/CD pipeline with AWS Chalice and AWS CodeCommit***
+AWS Chalice has a good support for creating continuous deployment pipelines. 
+
+Once the CloudFormation template has finished creating the stack, you should have several 
+new AWS resources that make up a bare bones CD pipeline.
+
+* CodeCommit Repository - The CodeCommit repository is the entrypoint into the pipeline. Any code you want to deploy should be pushed to this remote.
+* CodePipeline Pipeline - The CodePipeline is what coordinates the build process, and pushes the released code out.
+* CodeBuild Project - The CodeBuild project is where the code bundle is built that will be pushed to Lambda. The default CloudFormation template will create a CodeBuild stage that builds a package using chalice package and then uploads those artifacts for CodePipeline to deploy.
+* S3 Buckets - Two S3 buckets are created on your behalf.
+    * artifactbucketstore - This bucket stores artifacts that are built by the CodeBuild project. The only artifact by default is the transformed.yaml created by the aws cloudformation package command.
+    * applicationbucket - Stores the application bundle after the Chalice application has been packaged in the CodeBuild stage.
+* Each resource is created with all the required IAM roles and policies. 
+
+***4.Check if the video file already exists when uploading, and generate an error and an HTTP error response, if so.***   
+The best place in the project to do this check is when doign the presigned url call. 
+The response that we will send back if the file already exist is a 403 status code and the message
+ "The resource you request does already exist".
+
+**Mileston 4: Submit Your Work**
+
+The deliverable is the AWS Chalice Python project.  
+
+
+**Mileston 4: Solution**
+
+The solution is on ["Milestone 4 Github"](https://github.com/haduart/serverlessbackend-milestone4)
+
+***1. From the transcription invoke Amazon Comprehend to get the Sentiment and store it in DynamoDB***
+First we have to give permissions to our Lambda functions to have access to Amazon Comprehend. 
+This we can achieve it adding the correct policy in the .chalice/policy-dev.json
+
+```json
+  {
+      "Effect": "Allow",
+      "Action": "comprehend:*",
+      "Resource": "*"
+    }
+```
+
+Also we create some helper functions:
+```python
+_COMPREHEND_CLIENT = None
+
+def get_comprehend_client():
+    global _COMPREHEND_CLIENT
+    if _COMPREHEND_CLIENT is None:
+        _COMPREHEND_CLIENT = boto3.client('comprehend')
+    return _COMPREHEND_CLIENT
+```
+
+The easiest way to implement it is on the S3 ObjectCreated Lambda function handle_audio_created, 
+and do the sync call just before storing it in DynamoDB.
+
+```python
+@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
+                 events=['s3:ObjectCreated:*'])
+def handle_audio_created(event):
+    ...
+    elif _is_text(event.key):
+      ...
+      response = get_comprehend_client().detect_sentiment(
+                  Text=transcript,
+                  LanguageCode='en')
+      
+              print(json.dumps(response))
+      
+              try:
+                  get_dynamodb_metadata_table().put_item(Item={
+                      "JsonFile": event.key,
+                      "transcript": transcript,
+                      "Sentiment": response["Sentiment"]
+                  })
+              except Exception as e:
+                  print(e)
+                  raise NotFoundError("Error adding an element on dynamodb")
+```
+And this will be the easiest implementation that we can do to do this Sentiment analysis on our 
+transcribed video. 
+
+The result should look like the following in the DynamoDB
+![Alt text](images/dynamodb_sentiment_stored.png.png?raw=true "S3 output structure")
+
+***1.1 Refactoring: Using SNS to breack the S3 Event function handler*** 
+Because we have the same function listening for events on S3 and because we can only have one function listening on a S3 bucket 
+we have that the function handle_audio_created is for both audio and json:
+```python
+@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
+                 events=['s3:ObjectCreated:*'])
+def handle_audio_created(event):
+    if _is_audio(event.key):
+        ...
+    elif _is_text(event.key):
+        ...
+      
+```
+Taking a look a the services we see that Amazon Elastic Transcoder can post to a SNS topic when it's completed, but Amazon Transcribe
+doesn't do it. So actually we can create a different function listneing on the SNS topic onComplete and a part from sending a mail we can execute
+a lambda function and do the processing of the Audio. 
+
+We can use the @app.on_sns_message(topic=os.environ['TOPIC_NAME']) decorator to listen for it.
+
+To implement it we need to know the json structure that is being posted on the onComplete topic. Actually it's quite easy
+since we've configured the same topic to send us an email with the json document as a message. 
+So it looks like:
+
+```json
+{
+  "state": "COMPLETED",
+  "version": "2012-09-25",
+  "jobId": "1609273710440-ricuek",
+  "pipelineId": "1607332673743-ta1eh3",
+  "input": {
+    "key": "Test/angry2.mp4"
+  },
+  "inputCount": 1,
+  "outputKeyPrefix": "output/",
+  "outputs": [
+    ...
+    {
+      "id": "3",
+      "presetId": "1351620000001-100110",
+      "key": "audio/Test/angry2.mp3",
+      "status": "Complete",
+      "duration": 134
+    },
+    ...
+  ]
+}
+```
+As always we will create an evironment variable on .chalice/config:
+```json
+"AMAZON_TRANSCODER_ON_COMPLETE_TOPIC": "videopipelineONCOMPLETE",
+```
+
+And we will pick it up inside the project:
+```python
+AMAZON_TRANSCODER_ON_COMPLETE_TOPIC = os.getenv('AMAZON_TRANSCODER_ON_COMPLETE_TOPIC', 'videopipelineONCOMPLETE')
+```
+
+Then we will move all the logic for when the mp3 file was created in S3 to the SNS topic lambda dispatcher:
+```python
+@app.on_sns_message(topic=AMAZON_TRANSCODER_ON_COMPLETE_TOPIC)
+def on_audio_is_completed(event):
+    print("on_audio_is_completed")
+
+    message = json.loads(event.message)
+
+    output_key_prefix = message['outputKeyPrefix']
+    audio_path = output_key_prefix + message['outputs'][2]['key']
+    print("audio_path:" + audio_path)
+
+    random_name = str(random.randint(10000, 99999))
+    job_name = "JobName" + random_name
+    job_uri = "s3://" + AUDIO_MEDIA_BUCKET_NAME + "/" + audio_path
+    output_key = audio_path.replace("mp3", "json").replace("audio", "transcribe")
+    print("JobName: " + job_name)
+    print("job_uri: " + job_uri)
+    print("OutputKey: " + output_key)
     get_transcribe_client().start_transcription_job(
         TranscriptionJobName=job_name,
         Media={'MediaFileUri': job_uri},
         MediaSampleRateHertz=44100,
         MediaFormat='mp4',
         LanguageCode='en-US',
-        OutputBucketName='outputvideos.oico.com',
-        OutputKey='output/transcribe/test.json',
+        OutputBucketName=AUDIO_MEDIA_BUCKET_NAME,
+        OutputKey=output_key,
     )
 
     status = get_transcribe_client().get_transcription_job(TranscriptionJobName=job_name)
     print(status)
-```
-It's useful to follow the same convention as the rest of the output file structure. 
-We are planning to store it in the same outpub S3 bucket and following the folder structure: /output/transcribe/
-Notice that on the S3 event.key we can have the full path and name: output/audio/file.mp3. So we can use the same event.type 
-and replacing it for json format and audio folder for the transcribe folder. 
+    return {'transcribe': job_name}
+``` 
 
-![Alt text](docs/images/Amazon-Transcribe-Job.png?raw=true "S3 output structure")
- 
+***2. Create multiple stages with AWS Chalice*** 
+Right now we are working always on dev environment, but we want to create 
+the production environment.
 
-***4.Reuse the previous function and capture when the transcription JSON output text from Amazon Transcribe is created in S3 to store it in DynamoDB***   
-This function will parse the JSON file and store the transcription in DynamoDB.   
+In the production environment we will use different resources, so we will customize the environment 
+variables that we pass in. 
 
-Once Amazon Transcribe is completed a JSON document will be stored in S3. 
-
-This JSON structure will be like the following:
+First we will modify the .chalice/config.json to add the production (prod) stage:
 
 ```json
-{
-  "jobName": "TestTranscribe",
-  "accountId": "591#######07",
-  "results": {
-    "language_code": "en-US",
-    "transcripts": [
-      {
-        "transcript": "Hey, this is the full transcription!"
+  "stages": {
+    "dev": {
+      "api_gateway_stage": "api",
+      "environment_variables": {
+        "RESPONSES_TABLE_NAME": "responsesDEV",
+        "AMAZON_TRANSCODER_ON_COMPLETE_TOPIC": "videopipelineONCOMPLETEdev",
+        "METADATA_TABLE_NAME": "metadataDEV",
+        "MEDIA_BUCKET_NAME": "dev.videos.oico.com",
+        "AUDIO_MEDIA_BUCKET_NAME": "dev.outputvideos.oico.com",
+        "PIPELINE_NAME": "1607332673743-ta34rt"
       }
-    ],
-    "language_identification": [
-      {
-        "score": "0.9968",
-        "code": "en-US"
-      },
-      {
-        "score": "0.0032",
-        "code": "en-GB"
+    },
+    "prod": {
+      "api_gateway_stage": "api",
+      "environment_variables": {
+        "RESPONSES_TABLE_NAME": "responses",
+        "AMAZON_TRANSCODER_ON_COMPLETE_TOPIC": "videopipelineONCOMPLETE",
+        "METADATA_TABLE_NAME": "metadata",
+        "MEDIA_BUCKET_NAME": "videos.oico.com",
+        "AUDIO_MEDIA_BUCKET_NAME": "outputvideos.oico.com",
+        "PIPELINE_NAME": "1607332673743-ta1eh3"
       }
-    ],
-    "items":[
-        ...
-    ]
-  },
-  "status": "COMPLETED"
-}
-```
-What we want to store in DynamoDB is the transcript entry where you can find the full transcription:
-results > transcripts > 0 > transcript 
-
-Also, to store the transcription and all the following metadata information that we can extract out from the JSON file we 
-will create a different DynamoDB table. 
-
-We will use the following template for it:
-```yaml
-AWSTemplateFormatVersion: "2010-09-09"
-Resources:
-  responsesTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      AttributeDefinitions:
-        - AttributeName: "JsonFile"
-          AttributeType: "S"
-      KeySchema:
-        - AttributeName: "JsonFile"
-          KeyType: "HASH"
-      ProvisionedThroughput:
-        ReadCapacityUnits: "5"
-        WriteCapacityUnits: "5"
-      TableName: "metadata"
-```
-Once everything is done, we should have an entry like this:
-![Alt text](docs/images/dynamodb-metadata-table.png?raw=true "DynamoDB entry in Metadata Table")
-
-**Mileston 3: Submit Your Work**
-
-The deliverable is the AWS Chalice Python project.  
-
-
-**Mileston 3: Solution**
-
-The solution is on ["Milestone 3 Github"](https://github.com/haduart/serverlessbackend-milestone3)
-
-***1. Create lower resolutions for small devices and extracting audio only***
-A part from the Web preset we will use the iPhone4S, Audio_MP3 and Gif_Animated presets. 
-So the Elastic Transcoder will generate all the codifications at the same time, and the 
-output directory should look like the following:
-![Alt text](docs/images/S3-structure.png?raw=true "S3 output structure")
-
-To create the previous structure we have to specified in the output array that we pass as an argument to the elastic_transcoder_job.
-```python
-# Define the various outputs
-    outputs = [
-        {
-            'Key': 'web/' + output_file,
-            'PresetId': system_preset_web_preset_id
-        },
-        {
-            'Key': 'phone/' + output_file,
-            'PresetId': system_preset_iPhone4S
-        },
-        {
-            'Key': 'audio/' + output_file.replace("mp4", "") + "mp3",
-            'PresetId': system_preset_Audio_MP3_320k
-        },
-        {
-            'Key': 'gif/' + output_file.replace("mp4", "") + "gif",
-            'PresetId': system_preset_Gif_Animated
-        }
-    ]
-```
-We also need to know the Presets Ids for all the different outputs that we want to generate:
-```python
-    output_file_prefix = 'output/'  # Prefix for all output files
-
-    system_preset_web_preset_id = '1351620000001-100070' #mp4
-    system_preset_iPhone4S = '1351620000001-100020' #mp4
-    system_preset_Audio_MP3_320k = '1351620000001-100110' #mp3
-    system_preset_Gif_Animated = '1351620000001-100200' #gif
-```
-To find out the concrete Preset Id you have to search it in the Preset section in the Elastic Transcoder:
-![Alt text](docs/images/transcoder-presets.png?raw=true "Presets Ids")
-
-
-***2. Create a mail notification when a video is processed correctly and also 
-when an error has happened.***
-For this, we need to configure the AWS Simple Email Service (SES). 
-1. First you have to register and confirm a mail to receive the notifications.
-![Alt text](docs/images/verify-new-email-address.png?raw=true "Verify new mail")
-You will receive a mail to cofirm it, click on the link below.  
-![Alt text](docs/images/verify-new-email-address-2.png?raw=true "Verify new mail")
-In SES it will remain pending until it's not confirm
-![Alt text](docs/images/SES-pending-verification.png?raw=true "Pending confirmation in SES")
-
-2. Then create SNS topics for both cases and attach this mail to it.
-Create the topics and subscribe the previous validated mail
-![Alt text](docs/images/SNS-create-subscription.png?raw=true "SNS create subscription")
-![Alt text](docs/images/email-SNS-confirm-subscription.png?raw=true "Email SNS confirm subscription")
-![Alt text](docs/images/SNS-topics.png?raw=true "SNS topics")
-
-3. Configure Elastic Transcoder to use the previous topics when there's an error and when the job is complete.
-If you did it correctly you will receive a mail when the job is completed:
-![Alt text](docs/images/email-on-Complete?raw=true "Email On Complete")
-
-***3.Create another function that is triggered when the audio-only file is created in S3 and executes Amazon Transcribe with it.***
-The same that we did when a file was uploaded to S3 and we did all the codification we will do it when a file is created in the second S3 bucket. 
-
-```python
-@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
-                 events=['s3:ObjectCreated:*'])
-def handle_audio_created(event):
-    print("handle_audio_created: " + event.key)
-    if _is_audio(event.key):
-        print("Correct Audio generated: " + event.key)
-        random_name = str(random.randint(10000, 99999))
-        job_name = "JobName" + random_name
-        job_uri = "s3://" + AUDIO_MEDIA_BUCKET_NAME + "/" + event.key
-        get_transcribe_client().start_transcription_job(
-            TranscriptionJobName=job_name,
-            Media={'MediaFileUri': job_uri},
-            MediaSampleRateHertz=44100,
-            MediaFormat='mp4',
-            LanguageCode='en-US',
-            OutputBucketName=AUDIO_MEDIA_BUCKET_NAME,
-            OutputKey=event.key.replace("mp3", "json").replace("audio", "transcribe"),
-        )
-
-        status = get_transcribe_client().get_transcription_job(TranscriptionJobName=job_name)
-        print(status)
-        return {'transcribe': job_name}
-```
-
-To make it work we created some helper functions:
-```python
-def get_transcribe_client():
-    global _TRANSCRIBE_CLIENT
-    if _TRANSCRIBE_CLIENT is None:
-        _TRANSCRIBE_CLIENT = boto3.client('transcribe')
-    return _TRANSCRIBE_CLIENT
-
-def _is_audio(key):
-    return key.endswith(_SUPPORTED_AUDIO_EXTENSIONS)
-```
-
-So like we did to access S3 and Elastic Transcoder we have to add custom policy permissions in our project. 
-For that we have to include the following rules in .chalice/policy-dev.json 
-
-```json
-  {
-      "Effect": "Allow",
-      "Action": [
-        "transcribe:*"
-      ],
-      "Resource": "*"
     }
+  }
+```
+Since we are using a custom policy we have to create the .chalice/policy-prod.json
+
+To deploy the production staging instead of the development the command will be the following:
+```commandline
+chalice deploy --stage prod
 ```
 
-***4.Reuse the previous function and capture when the transcription JSON output text from Amazon Transcribe is created in S3 to store it in DynamoDB***   
-   
-It's useful to follow the same convention as the rest of the output file structure. 
-We are planning to store it in the same outpub S3 bucket and following the folder structure: /output/transcribe/
-Notice that on the S3 event.key we can have the full path and name: output/audio/file.mp3. So we can use the same event.type 
-and replacing it for json format and audio folder for the transcribe folder. 
+If you are copying the environment variables from the development staging 
+it will fail if the S3 buckets are the same from development. There can only be one 
+Lambda function subscribed to a S3 bucket. 
 
-We will reuse the same function:
+***3.Create a CI/CD pipeline with AWS Chalice and AWS CodeCommit***
+AWS Chalice has a good support for creating continuous deployment pipelines. 
 
-```python
-@app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
-                 events=['s3:ObjectCreated:*'])
-def handle_audio_created(event):
-    print("handle_audio_created: " + event.key)
-    if _is_audio(event.key):
-        ...
-    elif _is_text(event.key):
-        print("Correct JSON generated: " + event.key)
-        s3_clientobj = get_s3_client().get_object(Bucket=event.bucket,
-                                                  Key=event.key)
-        s3_clientdata = s3_clientobj['Body'].read().decode('utf-8')
+Once the CloudFormation template has finished creating the stack, you should have several 
+new AWS resources that make up a bare bones CD pipeline.
 
-        print("printing s3_clientdata")
-        print(s3_clientdata)
-
-        s3clientlist = json.loads(s3_clientdata)
-        print("json loaded data")
-        print("status: " + s3clientlist['status'])
-        transcript = s3clientlist['results']['transcripts'][0]['transcript']
-        print("transcript: " + transcript)
-
-```
-
-Also, to store the transcription and all the following metadata information that we can extract out from the JSON file we 
-will create a different DynamoDB table. 
-
-We will use the following template for it:
-```yaml
-AWSTemplateFormatVersion: "2010-09-09"
-Resources:
-  responsesTable:
-    Type: AWS::DynamoDB::Table
-    Properties:
-      AttributeDefinitions:
-        - AttributeName: "JsonFile"
-          AttributeType: "S"
-      KeySchema:
-        - AttributeName: "JsonFile"
-          KeyType: "HASH"
-      ProvisionedThroughput:
-        ReadCapacityUnits: "5"
-        WriteCapacityUnits: "5"
-      TableName: "metadata"
-```
-
-We will create this table using cloudformation from the AWS CLI:
+* CodeCommit Repository - The CodeCommit repository is the entrypoint into the pipeline. Any code you want to deploy should be pushed to this remote.
+* CodePipeline Pipeline - The CodePipeline is what coordinates the build process, and pushes the released code out.
+* CodeBuild Project - The CodeBuild project is where the code bundle is built that will be pushed to Lambda. The default CloudFormation template will create a CodeBuild stage that builds a package using chalice package and then uploads those artifacts for CodePipeline to deploy.
+* S3 Buckets - Two S3 buckets are created on your behalf.
+    * artifactbucketstore - This bucket stores artifacts that are built by the CodeBuild project. The only artifact by default is the transformed.yaml created by the aws cloudformation package command.
+    * applicationbucket - Stores the application bundle after the Chalice application has been packaged in the CodeBuild stage.
+* Each resource is created with all the required IAM roles and policies. 
 
 ```commandline
-$ aws cloudformation create-stack --stack-name dynamodb-metadata --capabilities CAPABILITY_IAM --template-body file://cloudformation/dynamodb-metadata-table.yml
+$ chalice generate-pipeline --pipeline-version v2 pipeline.json
+$ aws cloudformation deploy --stack-name mystack --template-file pipeline.json --capabilities CAPABILITY_IAM
+
+Waiting for changeset to be created..
+Waiting for stack create/update to complete
+Successfully created/updated stack - mystack
 ```
 
-We add the extra parameter in the .chalice/config.json file:
-```json
-"METADATA_TABLE_NAME": "metadata",
-```
-Of course we will use this variable in our project and we will create a caching mechanism around the new table
+***4.Check if the video file already exists when uploading, and generate an error and an HTTP error response, if so.***
+The best place in the project to do this check is when doign the presigned url call. 
+The response that we will send back if the file already exist is a 403 status code and the message
+ "The resource you request does already exist".
+
+There are multiple ways to check if a file already exist in S3 but this is one of the fastest:
+
 ```python
-_DYNAMODB_METADATA_TABLE = None
-METADATA_TABLE_NAME = os.getenv('METADATA_TABLE_NAME', 'metadata')
-
-def get_dynamodb_metadata_table():
-    global _DYNAMODB_METADATA_TABLE
-    global _DYNAMODB_CLIENT
-    if _DYNAMODB_METADATA_TABLE is None:
-        if _DYNAMODB_CLIENT is None:
-            _DYNAMODB_CLIENT = boto3.resource('dynamodb')
-        _DYNAMODB_METADATA_TABLE = _DYNAMODB_CLIENT.Table(METADATA_TABLE_NAME)
-    return _DYNAMODB_METADATA_TABLE
+def check_if_file_exists(file_name):
+    try:
+        get_s3_client().head_object(Bucket=MEDIA_BUCKET_NAME, Key=file_name)
+    except ClientError as e:
+        print("The file does not exist")
+        return False
+    else:
+        print("The file exist")
+        return True
 ```
 
-Once we have this we can extend one more time our handle_audio_created function that is triggered when an S3 object is created,
-and this time we will add the last step to store the transcription in our new table:
+The HEAD operation retrieves metadata from an object without returning 
+the object itself. This operation is useful if you're only interested in 
+an object's metadata.
+
+Then in the presigned url call we will check if the file already exist before generating the presigend url:
+
 ```python
-    elif _is_text(event.key):
-        ...
 
-        try:
-            get_dynamodb_metadata_table().put_item(Item={
-                "JsonFile": event.key,
-                "transcript": transcript
-            })
-        except Exception as e:
-            print(e)
-            raise NotFoundError("Error adding an element on dynamodb")
+
+
+@app.route('/presignedurl/{project}/{step}', methods=['GET'], cors=cors_config)
+def presigned_url(project, step):
+    ...
+    new_user_video = project + "/" + str(step_number) + "/" + hexmail + '.webm'
+    if check_if_file_exists(new_user_video):
+        return Response(body="The resource you requested does already exist",
+                        status_code=403,
+                        headers={'Content-Type': 'text/plain'})
+
+    ...
 ```
 
-Once everything is done, we should have an entry like this:
-![Alt text](docs/images/dynamodb-metadata-table.png?raw=true "DynamoDB entry in Metadata Table")
+**Importance to project**    
+In this project we've seen how to use advance ML services in AWS like Amazon Comprehend
+and how to integrate them in our own projects. We've also seen how to extract code in 
+a serverless project, using other events that are dispatched so we have smaller Amazon Lambda 
+functions. 
 
-**Importance to project**
-In this project we have experienced a more advanced and complex Event Driven Architecture, doing multiple
-asynchronous steps when a file is being uploaded. Each step involves different AWS services, also getting 
-more expertise in each of them: 
-* We used Amazon Elastic Transcoder extensively to do multiple media convertions from the original video to multiple resolutions, audio and a gif animation too.
-* We learned how to use Amazon Transcribe and how to triggered from an AWS Lambda Python function.    
+Finally, we've created different stages, one for production and another for development. And we've seen 
+how to pass specific data for each stage through environment variables. Also we've seen how we can easily 
+create a CI/CD environment for our project with AWS Chalice, that allow us to easily create
+a CodeCommit Repository, a CodePipeline Pipeline, a CodeBuild Project and also extra S3 buckets to 
+store the generated artifacts. 
+
 
 **Takeaways**
-* Experience with event-driven architectures
-* Hands-on experience with Amazon Simple Email Service 
-* Experience with complex flows with Amazon Elastic Transcoder
-* Using Amazon Transcribe 
-
+* Hands-on experience with Amazon Comprehend for Sentiment Analysis. 
+* Experience with DynamoDB streams.
+* Manually configuring to dispatch events when data is added/updated or deleted.
+* Manually attaching a Lambda Function in AWS Chalice.  
+* Create multiple stages with AWS Chalice
+* Create and use environment variables in AWS Chalice
+* Setup and use AWS CodeCommit
+* Create CI/CD pipelines
+* Diagnose errors in with AWS CloudWatch.
+ 
 **Resources**
 
-* [Amazon Transcribe Developer Guide](https://docs.aws.amazon.com/transcribe/latest/dg/API_StartTranscriptionJob.html#transcribe-StartTranscriptionJob-request-OutputKey)
+* [Amazon Comprehend](https://aws.amazon.com/comprehend/)
+* [Amazon Comprehend Boto3 Detect Sentiment](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/comprehend.html#Comprehend.Client.detect_sentiment)
+* [AWS Chalice Stages](https://aws.github.io/chalice/topics/stages.html)
+* [AWS Chalice Continuous Deployment](https://aws.github.io/chalice/topics/cd.html)
+* [AWS Chalice CloudFormation Support](https://aws.github.io/chalice/topics/cfn.html)

@@ -1,5 +1,5 @@
 from botocore.exceptions import ClientError
-from chalice import Chalice, CORSConfig, NotFoundError, BadRequestError, Response, AuthResponse, AuthRoute, \
+from chalice import Chalice, CORSConfig, NotFoundError, BadRequestError, ForbiddenError,  Response, AuthResponse, AuthRoute, \
     CognitoUserPoolAuthorizer
 from basicauth import decode
 import logging
@@ -18,6 +18,8 @@ _DYNAMODB_TABLE = None
 _DYNAMODB_METADATA_TABLE = None
 _ELASTIC_TRANSCODER_CLIENT = None
 _TRANSCRIBE_CLIENT = None
+_COMPREHEND_CLIENT = None
+
 _SUPPORTED_VIDEO_EXTENSIONS = (
     '.mp4'
 )
@@ -31,12 +33,20 @@ _SUPPORTED_TEXT_EXTENSIONS = (
 app.log.setLevel(logging.DEBUG)
 
 RESPONSES_TABLE_NAME = os.getenv('RESPONSES_TABLE_NAME', 'responses')
+AMAZON_TRANSCODER_ON_COMPLETE_TOPIC = os.getenv('AMAZON_TRANSCODER_ON_COMPLETE_TOPIC', 'videopipelineONCOMPLETE')
 METADATA_TABLE_NAME = os.getenv('METADATA_TABLE_NAME', 'metadata')
 MEDIA_BUCKET_NAME = os.getenv('MEDIA_BUCKET_NAME', 'videos.oico.com')
 AUDIO_MEDIA_BUCKET_NAME = os.getenv('AUDIO_MEDIA_BUCKET_NAME', 'outputvideos.oico.com')
 PIPELINE_NAME = os.getenv('PIPELINE_NAME', '1607332673743-ta1eh3')
 
 cors_config = CORSConfig(allow_origin="*")
+
+
+def get_comprehend_client():
+    global _COMPREHEND_CLIENT
+    if _COMPREHEND_CLIENT is None:
+        _COMPREHEND_CLIENT = boto3.client('comprehend')
+    return _COMPREHEND_CLIENT
 
 
 def get_transcribe_client():
@@ -80,21 +90,22 @@ def get_s3_client():
     return _S3_CLIENT
 
 
-@app.route('/')
+def check_if_file_exists(file_name):
+    try:
+        get_s3_client().head_object(Bucket=MEDIA_BUCKET_NAME, Key=file_name)
+    except ClientError as e:
+        print("The file does not exist")
+        return False
+    else:
+        print("The file exist")
+        return True
+
+
+@app.route('/', cors=cors_config)
 def index():
-    s3_clientobj = get_s3_client().get_object(Bucket='outputvideos.oico.com',
-                                              Key='output/transcribe/videoask.json')
-    s3_clientdata = s3_clientobj['Body'].read().decode('utf-8')
-
-    print("printing s3_clientdata")
-    print(s3_clientdata)
-
-    s3clientlist = json.loads(s3_clientdata)
-    print("json loaded data")
-    print("status: " + s3clientlist['status'])
-    transcript = s3clientlist['results']['transcripts'][0]['transcript']
-    print("transcript: " + transcript)
-    return {'transcript': transcript}
+    return Response(body="The resource you requested does exist",
+                    status_code=403,
+                    headers={'Content-Type': 'text/plain'})
 
 
 @app.authorizer()
@@ -163,6 +174,10 @@ def presigned_url(project, step):
     print("hex mail: " + hexmail)
 
     new_user_video = project + "/" + str(step_number) + "/" + hexmail + '.webm'
+    if check_if_file_exists(new_user_video):
+        return Response(body="The resource you requested does already exist",
+                        status_code=403,
+                        headers={'Content-Type': 'text/plain'})
 
     try:
         get_dynamodb_table().put_item(Item={
@@ -175,7 +190,7 @@ def presigned_url(project, step):
         raise NotFoundError("Error adding an element on dynamodb")
 
     try:
-        response = get_s3_client().generate_presigned_post(Bucket="videos.oico.com",
+        response = get_s3_client().generate_presigned_post(Bucket=MEDIA_BUCKET_NAME,
                                                            Key=new_user_video,
                                                            Fields={"acl": "public-read"},
                                                            Conditions=[{
@@ -199,27 +214,9 @@ def handle_object_created(event):
 
 @app.on_s3_event(bucket=AUDIO_MEDIA_BUCKET_NAME,
                  events=['s3:ObjectCreated:*'])
-def handle_audio_created(event):
+def handle_transcription_is_created(event):
     print("handle_audio_created: " + event.key)
-    if _is_audio(event.key):
-        print("Correct Audio generated: " + event.key)
-        random_name = str(random.randint(10000, 99999))
-        job_name = "JobName" + random_name
-        job_uri = "s3://" + AUDIO_MEDIA_BUCKET_NAME + "/" + event.key
-        get_transcribe_client().start_transcription_job(
-            TranscriptionJobName=job_name,
-            Media={'MediaFileUri': job_uri},
-            MediaSampleRateHertz=44100,
-            MediaFormat='mp4',
-            LanguageCode='en-US',
-            OutputBucketName=AUDIO_MEDIA_BUCKET_NAME,
-            OutputKey=event.key.replace("mp3", "json").replace("audio", "transcribe"),
-        )
-
-        status = get_transcribe_client().get_transcription_job(TranscriptionJobName=job_name)
-        print(status)
-        return {'transcribe': job_name}
-    elif _is_text(event.key):
+    if _is_text(event.key):
         print("Correct JSON generated: " + event.key)
         s3_clientobj = get_s3_client().get_object(Bucket=event.bucket,
                                                   Key=event.key)
@@ -234,10 +231,17 @@ def handle_audio_created(event):
         transcript = s3clientlist['results']['transcripts'][0]['transcript']
         print("transcript: " + transcript)
 
+        response = get_comprehend_client().detect_sentiment(
+            Text=transcript,
+            LanguageCode='en')
+
+        print(json.dumps(response))
+
         try:
             get_dynamodb_metadata_table().put_item(Item={
                 "JsonFile": event.key,
-                "transcript": transcript
+                "transcript": transcript,
+                "Sentiment": response["Sentiment"]
             })
         except Exception as e:
             print(e)
@@ -315,14 +319,37 @@ def transcoder_video(input_file):
     print(f'Created Amazon Elastic Transcoder job {job_info["Id"]}')
 
 
-# @app.on_sns_message(topic=os.environ['VIDEO_TOPIC_NAME'])
-# def add_video_file(event):
-#    message = json.loads(event.message)
-#    labels = get_rekognition_client().get_video_job_labels(message['JobId'])
-#    get_media_db().add_media_file(
-#        name=message['Video']['S3ObjectName'],
-#        media_type=db.VIDEO_TYPE,
-#        labels=labels)
+@app.on_sns_message(topic=AMAZON_TRANSCODER_ON_COMPLETE_TOPIC)
+def on_audio_is_completed(event):
+    print("on_audio_is_completed")
+
+    message = json.loads(event.message)
+
+    output_key_prefix = message['outputKeyPrefix']
+    audio_path = output_key_prefix + message['outputs'][2]['key']
+    print("audio_path:" + audio_path)
+
+    random_name = str(random.randint(10000, 99999))
+    job_name = "JobName" + random_name
+    job_uri = "s3://" + AUDIO_MEDIA_BUCKET_NAME + "/" + audio_path
+    output_key = audio_path.replace("mp3", "json").replace("audio", "transcribe")
+    print("JobName: " + job_name)
+    print("job_uri: " + job_uri)
+    print("OutputKey: " + output_key)
+    get_transcribe_client().start_transcription_job(
+        TranscriptionJobName=job_name,
+        Media={'MediaFileUri': job_uri},
+        MediaSampleRateHertz=44100,
+        MediaFormat='mp4',
+        LanguageCode='en-US',
+        OutputBucketName=AUDIO_MEDIA_BUCKET_NAME,
+        OutputKey=output_key,
+    )
+
+    status = get_transcribe_client().get_transcription_job(TranscriptionJobName=job_name)
+    print(status)
+    return {'transcribe': job_name}
+
 
 def _is_audio(key):
     return key.endswith(_SUPPORTED_AUDIO_EXTENSIONS)
