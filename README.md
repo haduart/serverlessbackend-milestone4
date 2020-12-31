@@ -25,7 +25,7 @@ log it in AWS CloudWatch.
 Because Amazon Comprehend can do a sync call to determine the sentiment, we can easily do this call before storing it to DynamoDB. 
 
 The result should look like the following in the DynamoDB
-![Alt text](docs/images/dynamodb_sentiment_stored.png.png?raw=true "S3 output structure")
+![Alt text](docs/images/dynamodb_sentiment_stored.png?raw=true "S3 output structure")
 
 ***1.1 Refactoring: Using SNS to breack the S3 Event function handler*** 
 Because we have the same function listening for events on S3 and because we can only have one function listening on a S3 bucket 
@@ -167,7 +167,7 @@ And this will be the easiest implementation that we can do to do this Sentiment 
 transcribed video. 
 
 The result should look like the following in the DynamoDB
-![Alt text](docs/images/dynamodb_sentiment_stored.png.png?raw=true "S3 output structure")
+![Alt text](docs/images/dynamodb_sentiment_stored.png?raw=true "S3 output structure")
 
 ***1.1 Refactoring: Using SNS to breack the S3 Event function handler*** 
 Because we have the same function listening for events on S3 and because we can only have one function listening on a S3 bucket 
