@@ -18,6 +18,18 @@ separating the production and development stages. We will also deploy our projec
 create a CI/CD pipeline. We will create custom HTTP responses if an error occurs with AWS Chalice and 
 log it in AWS CloudWatch. 
 
+**Considerations before starting**
+
+Before starting this project consider veryfying that all necessary servies are available in your region. 
+![Alt text](docs/images/regions.png?raw=true "All regions in AWS")
+One way of knowing if those services are available is checking the FAQ:
+* [ElasticTranscoder FAQ](https://aws.amazon.com/en/elastictranscoder/faqs/)
+You can also refer to the [AWS Global Infraestructure Regional Table](https://aws.amazon.com/en/about-aws/global-infrastructure/regional-product-services/)  
+
+The services that your region has to support are and that are more infrequent or experimental are:
+* AWS Elastic Transcoder
+* Amazon Comprehend
+* AWS Transcribe
 
 **Workflow**
 
@@ -393,6 +405,19 @@ store the generated artifacts.
 * Setup and use AWS CodeCommit
 * Create CI/CD pipelines
 * Diagnose errors in with AWS CloudWatch.
+
+**Clean up**
+To delete the Chalice project just run the delecte command form the Chalice CLI.
+```commandline
+ $ chalice delete
+```
+This command will remove AWS Gateways and AWS Lambdas that have been created due to Chalice.
+To delete the cloudformation stack use the following command from the AWS CLI:
+```commandline
+$ aws cloudformation delete-stack --stack-name dynamodb-oico
+```
+A part from all of this, if you've created any other AWS resource manually you have to also manually remove it (S3, Transcode, Transcribe, Comprehend) 
+
  
 **Resources**
 
